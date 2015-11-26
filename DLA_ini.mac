@@ -1,0 +1,122 @@
+! dynamic_load_analysis
+! DLA.mac
+!
+! Moving and fixed (steady state) dynamic load analysis with sinusoid exciting force (time history analysis)
+!
+!
+! USAGE: 
+!	* define element group under name 'moving_load_path' - contains the elements where the load will be applied
+!	* adjust values inside the settings part
+!	* moving_load_results
+!	OPTIONAL:
+!	* (applies only for reduced analysis) define the node/element group under name 'moving_load_results' where results are needed (if not selected the nodes corresponding to 'moving_load_path' will be selected)
+!	
+!
+!
+! NOTES: 
+!	* currently can handle only cases where the moving path runs in X direction (local coordinate system required otherwise) and loaded in Z direction
+!	* in case of full transient analaysis the Rayleigh damping coefficients are calculated with the assumptions that the first two important (largest mass participation in excitation direction if mass_sort_freq=1) modes have the specified structural damping
+!	* currently working only with line type load path (torsional modes..)
+!	* the moving_load_path is used for mode shape extraction for BS -> later mode_line COMP
+!	* -> later moving_load_area COMP 
+
+FINISH
+/CLEAR,START
+
+!***************************************************************************************************************************
+!* SETTINGS
+!***************************************************************************************************************************
+!+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+!file_name		= 'simple_beam'
+file_name		= 'Eszaki_ferdekabeles'
+
+ksic			= 0.03			    ! structural damping -  constant modal damping for 'modal' type analaysis and Rayleigh type damping for 'full' type analayis
+
+! Loading
+loading			= 'fixed'		    ! 'fixed' (steady state) or 'moving' (pedestrian group)
+movement		= 'walking'		    ! 'walking'; 'jogging' (only affects the 'moving' type analysis
+code			= 'SETRA'		    ! 'no'; 'BS' - EN BS; 'SETRA' - french recommendations
+
+load_velocity		= 1000			    ! [mm/s] (only for 'moving'; if code (BS) is selected it will be overwritten)
+load_amplitude		= 1013			    ! scalar [N] for moving; scalar [N/mm] for fixed; if code (BS, SETRA) is selected it will be overwritten)
+excited_freq		= 2			    ! number!, modes sorted in respect of mass participation in the direction of excitation
+loaded_width		= 3.6*1000
+
+mass_sort_freq		= 'no'			    ! sort freqs according to modal participation -> select accordingly
+
+!BS
+BS_category		= 'B'			    ! 'A'; 'B'; 'C'; 'D'
+
+!Sétra
+SETRA_category		= 3
+direction		= 'V'			    ! 'V' - vertical, 'L' - longitudinal, 'T' - transverse
+
+! Analysis type - for time history
+analysis		= 'modal'		    ! 'full' - full transient (not working -  freqs for Rayleigh dampoing should be specified), 'modal' - modal superposition
+load_def		= 'array'		    ! 'array' - loading as array (vector) -> constant time step
+						    ! 'table' (not working) - loading as table -> automatic time step can be used (only in case of full transient)
+! Analysis options
+max_mode		= 30			    ! maximum number of modes calculated if modal transient analysis is selected
+time_step		= 20			    ! T/time_step
+time_factor		= 1.5			    ! if >1.0 increase the time to explore the decay of vibration
+
+f1			= 0			    ! [Hz] (leave it zero if you want to let the module to select the frequencies - not always a good idea)
+f2			= 0			    ! [Hz]
+
+! Results
+results			= 'reduced'		    ! 'full' - all results for every element is saved; 'reduced' - only the results for nodes of 'moving_load_path' (or 'moving_load_results' if specified) are saved
+post_proc		= 'yes'			    ! 'yes'; 'no'; basic post-processing
+!+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+!***************************************************************************************************************************
+!* RELOAD MODEL
+!***************************************************************************************************************************
+
+/COPY,%file_name%,db,,%file_name%_DLA_basic,db
+PARSAV,SCALAR,temp_param,parm
+
+RESUME,%file_name%_DLA_basic,db,,0,
+
+PARRES,CHANGE,temp_param,parm
+PARSAV,SCALAR,%file_name%_DLA_basic_param,parm
+
+/FILNAME,%file_name%_DLA_basic,1
+
+! create a folder to save results of dynamic load analysis
+!/MKDIR,DLA
+
+!***************************************************************************************************************************
+!* ANALYSIS - CALL DLA.mac
+!***************************************************************************************************************************
+
+
+!1
+analysis_number = 1
+DLA
+
+!2
+RESUME,%file_name%_DLA_basic,db,,0,
+PARRES,CHANGE,%file_name%_DLA_basic_param,parm
+
+analysis_number = 2
+ksic			= 0.05
+!code			= 'SETRA'
+!loading			= 'moving'
+!movement		= 'walking'
+DLA
+
+!3
+RESUME,%file_name%_DLA_basic,db,,0,
+PARRES,CHANGE,%file_name%_DLA_basic_param,parm
+
+analysis_number = 3
+ksic			= 0.01
+!loading			= 'moving'
+!movement		= 'jogging'
+DLA
+
+
+
+

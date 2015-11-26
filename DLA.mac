@@ -1,0 +1,721 @@
+! dynamic_load_analysis
+! DLA.mac
+! for description and settings see DLA_ini.mac
+
+FINISH
+
+
+!constants
+pi			= 3.14159265359
+meaning_of_life		= 42
+
+ksic_char		= CHRVAL(ksic)
+
+!************************************************
+!* RELOAD MODEL + INITIALIZATION
+!************************************************
+
+/COPY,%file_name%_DLA_basic,db,,%file_name%_DLA_%analysis_number%,db
+PARSAV,SCALAR,temp_param,parm
+
+RESUME,%file_name%_DLA_%analysis_number%,db,,0,
+
+PARRES,CHANGE,temp_param,parm
+PARSAV,SCALAR,%file_name%_DLA_%analysis_number%_param,parm
+
+/FILNAME,%file_name%_DLA_%analysis_number%,1
+
+! INITIAL CHECK 
+*GET, path_ckeck, COMP, moving_load_path, TYPE
+*GET, results_ckeck, COMP, moving_load_results, TYPE
+
+*IF,path_ckeck,NE,2,THEN
+	*MSG,ERROR
+	'Moving_load_path' component (element) is not defined!
+*ENDIF
+
+*IF,results,EQ,'reduced',AND,results_ckeck,NE,1,THEN
+	CMSEL,S,moving_load_path,ELEM
+	NSLE,S
+	CM,moving_load_results,NODE
+*ELSEIF,results,EQ,'full',THEN
+	ALLSEL,ALL
+	CM,moving_load_results,NODE
+*ENDIF
+
+
+!***************************************************************************************************************************
+!* SOLVER - EIGENVALUE ANALYSIS
+!***************************************************************************************************************************
+/SOLU
+!KEYW,pr_sgui,1		! suppress solution done message
+
+*IF,analysis,EQ,'full',THEN
+	nrmodes			= 10			! number of modes required
+*ELSEIF,analysis,EQ,'modal',THEN
+	CMSEL,S,moving_load_path,ELEM
+	NSLE,S
+	*GET,n_num_path,NODE,0,COUNT
+
+	nrmodes			= MIN(2*n_num_path, max_mode)		! number of modes required
+*ENDIF
+
+
+ANTYPE,MODAL,NEW
+NLGEOM,0  
+PSTRES, OFF
+MODOPT,LANB,nrmodes,0,1e30,  ,OFF, , 
+MXPAND,nrmodes,,,NO, 
+
+ALLSEL,ALL
+
+!!** Output files
+OUTRES,ALL,NONE  
+OUTRES,NSOL,ALL  
+OUTRES,RSOL,ALL  
+OUTPR,ALL,NONE  
+ERESX,YES
+
+!** Restart options
+!RESCONT,DEFINE,NONE
+
+ALLSEL,ALL
+SAVE
+/OUTPUT,%file_name%_modalmodes,txt
+
+SOLVE   
+/OUTPUT, TERM  
+
+*MSG,INFO,
+Modal analysis has been completed.
+FINISH
+
+!***************************************************************************************************************************
+!* PREPARES TIME HISTORY LOADING
+!***************************************************************************************************************************
+/POST1
+
+! extract frequencies and modal participations
+*DEL,freq_s
+*DIM,freq_s,ARRAY,nrmodes,2
+
+*DO,i,1,nrmodes
+	*GET,freq_i,MODE,i,FREQ
+	*GET,pfact_i,MODE,i,PFACT,Z
+
+	freq_s(i,1) = ABS(freq_i)
+	freq_s(i,2) = ABS(pfact_i)
+*ENDDO
+
+*IF,mass_sort_freq,EQ,'yes',THEN
+	! sort according to modal participation in z direction - ascending order
+	*DEL,freq_order
+	*MOPER,freq_order,freq_s,SORT,,2
+
+	! TIME number of the excited frequency -> to extract the eigenvector
+	set_num		= freq_order(nrmodes+1-excited_freq)
+
+*ELSEIF,mass_sort_freq,EQ,'no',THEN
+	set_num		= excited_freq
+	excited_freq	= nrmodes+1 - excited_freq
+*ENDIF
+
+
+
+! LOADING
+CMSEL,S,moving_load_path,ELEM
+NSLE,S
+*GET, i_x, NODE, 0, MNLOC, X
+*GET, j_x, NODE, 0, MXLOC, X
+
+
+f_s			= freq_s(nrmodes+1-excited_freq,1)
+span_x			= ABS(j_x-i_x)
+
+*IF,loading,EQ,'moving',THEN
+	duration		= span_x/load_velocity
+*ELSEIF,loading,EQ,'fixed',THEN
+	duration		= 1/f_s*30
+*ENDIF
+
+dt			= 1/f_s/time_step			! controls time step size (should be checked if accurate enough or not)
+time_step_num_		= NINT(duration/dt)	
+
+time_step_num		= NINT(time_step_num_*time_factor)			! ?x longer duration -> decay of vibration can be checked
+
+! x coordinates and number of nodes on loading path
+ALLSEL,ALL
+CMSEL,S,moving_load_path,ELEM
+NSLE,S,CORNER
+*GET, n_num, NODE, 0, COUNT
+*GET, n_min, NODE, 0, NUM, MIN
+
+
+*DEL, n_path_data		!node number(1); node x coord(2) node eigenvalue(3)
+*DIM, n_path_data, ARRAY, n_num, 3
+
+! node number
+*VGET, n_path_data(1,1), NODE, n_min, NLIST, , , ,0
+
+! x coordinates (it would be easier with *vmask)
+*DEL,n_i
+n_i = n_min
+*DO,i,1,n_num
+	*GET,n_path_data(i,2),NODE,n_i,LOC,X
+	CMSEL,S,moving_load_path,ELEM
+	NSLE,S,CORNER
+	*GET,n_i,NODE,n_i,NXTH
+*ENDDO
+
+*DEL,dummy
+*MOPER,dummy,n_path_data,SORT,,2
+
+
+! calculate the 'loading distance' for each node
+*DEL,n_loading_d
+*DIM,n_loading_d,ARRAY,n_num,3
+
+*DO,i,1,n_num
+	*IF,i,EQ,1,THEN		
+		n_loading_d(i,2)	= 0
+		n_loading_d(i,3)	= ABS((n_path_data(2,2) + n_path_data(1,2))/2 - n_path_data(1,2))
+		n_loading_d(i,1)	= n_loading_d(i,3) - n_loading_d(i,2)
+	*ELSEIF,i,NE,1,AND,i,NE,n_num,THEN
+		n_loading_d(i,2)	= ABS((n_path_data(i,2) + n_path_data(i-1,2))/2 - n_path_data(1,2))
+		n_loading_d(i,3)	= ABS((n_path_data(i+1,2) + n_path_data(i,2))/2 - n_path_data(1,2))
+		n_loading_d(i,1)	= n_loading_d(i,3) - n_loading_d(i,2)
+	*ELSEIF,i,EQ,n_num,THEN
+		n_loading_d(i,2)	= ABS((n_path_data(i,2) + n_path_data(i-1,2))/2 - n_path_data(1,2))
+		n_loading_d(i,3)	= ABS(n_path_data(i,2) - n_path_data(1,2)) 
+		n_loading_d(i,1)	= n_loading_d(i,3) - n_loading_d(i,2)
+	*ENDIF
+*ENDDO
+
+! calculate the 'loading time' for each node
+*DEL,n_loading_t
+*DIM,n_loading_t,ARRAY,n_num,3
+
+*DO,i,1,n_num
+	*IF,i,EQ,1,THEN
+		n_loading_t(i,1) = n_loading_d(i,1)/load_velocity
+		n_loading_t(i,2) = 0
+		n_loading_t(i,3) = n_loading_d(i,3)/load_velocity
+	*ELSEIF,i,NE,1,THEN
+		n_loading_t(i,1) = n_loading_d(i,1)/load_velocity
+		n_loading_t(i,2) = n_loading_d(i,2)/load_velocity
+		n_loading_t(i,3) = n_loading_d(i,3)/load_velocity
+	*ENDIF
+*ENDDO
+
+! ELVILEG EZ IS JÓ
+!ALLSEL,ALL
+!NSLE,S,CORNER
+!*GET, n_max_all, NODE, 0, NUM, MAX	! modál analízis után a legnagyobb node szám megváltozik...
+!*DEL,n_mask
+!*DIM,n_mask,ARRAY,n_max_all,1
+!*DEL,n_all
+!*DIM,n_all,ARRAY,n_max_all,1
+!*DEL,n_UZ_all
+!*DIM,n_UZ_all,ARRAY,n_max_all,1
+
+! node number
+!*VGET,n_all(1), NODE, 1, NLIST, , , ,0
+
+!CMSEL,S,moving_load_path,ELEM
+!NSLE,S,CORNER
+! create mask based on selection
+!*VGET,n_mask(1),NODE,1,NSEL
+!*VFUN,n_mask,NOT,n_mask
+!*VFUN,n_mask,NOT,n_mask
+
+! get the eigenvector' values (UZ) on 'moving_load_path'
+!ALLSEL,ALL
+
+!SET,,,,,,,set_num
+!	*VMASK,n_mask(1)
+!	*VGET,n_UZ_all,NODE,n_min,U,Z
+!	*VMASK,n_mask(1)
+!	*VFUN,n_path,COMP,n_all
+!	*VMASK,n_mask(1)
+!	*VFUN,n_UZ_path,COMP,n_UZ_all
+
+
+SET,,,,,,,set_num
+ALLSEL,ALL
+
+*DEL,n_i
+*DO,i,1,n_num
+	n_i = n_path_data(i,1)
+	*GET,n_path_data(i,3),NODE,n_i,U,Z
+*ENDDO
+
+
+! ------------------------------------------------------------------------------------------------------
+! - AMPLITUDE OF LOADING
+! ------------------------------------------------------------------------------------------------------
+
+*IF,code,EQ,'BS',THEN
+! BS NA EN 1991-2:2003
+	! CATEGORY
+	*IF,BS_category,EQ,'A',THEN
+		N_walking	= 2
+		N_jogging	= 0
+		ro_crowd	= 0/1000**2
+	*ELSEIF,BS_category,EQ,'B',THEN
+		N_walking	= 4
+		N_jogging	= 1
+		ro_crowd	= 0.4/1000**2
+	*ELSEIF,BS_category,EQ,'C',THEN
+		N_walking	= 8
+		N_jogging	= 2
+		ro_crowd	= 0.8/1000**2
+	*ELSEIF,BS_category,EQ,'D',THEN
+		N_walking	= 16
+		N_jogging	= 4
+		ro_crowd	= 1.5/1000**2
+	*ENDIF
+	
+	! REDUCTION FACTOR GAMMA
+	! for group loading - moving
+	*DEL,group_gamma_table
+	*DIM,group_gamma_table,TABLE,11,8
+
+	group_gamma_table(1,0) = 0.000, 0.020, 0.040,	0.060, 0.080, 0.100, 0.120, 0.140, 0.160, 0.180, 0.200
+	group_gamma_table(0,1) = 10 000
+	group_gamma_table(0,2) = 12 000
+	group_gamma_table(0,3) = 15 000
+	group_gamma_table(0,4) = 20 000
+	group_gamma_table(0,5) = 30 000
+	group_gamma_table(0,6) = 40 000
+	group_gamma_table(0,7) = 60 000
+	group_gamma_table(0,8) = 300 000
+
+	group_gamma_table(1,1) = 0.685, 0.695, 0.705, 0.715, 0.725, 0.735, 0.745, 0.755, 0.765, 0.773, 0.780	!10
+	group_gamma_table(1,2) = 0.430, 0.460, 0.490, 0.510, 0.535, 0.555, 0.580, 0.595, 0.610, 0.625, 0.635	!12
+	group_gamma_table(1,3) = 0.310, 0.340, 0.370, 0.405, 0.430, 0.465, 0.490, 0.512, 0.535, 0.562, 0.580	!15
+	group_gamma_table(1,4) = 0.245, 0.285, 0.315, 0.350, 0.380, 0.407, 0.435, 0.470, 0.500, 0.525, 0.550	!20
+	group_gamma_table(1,5) = 0.198, 0.235, 0.275, 0.310, 0.340, 0.380, 0.410, 0.445, 0.480, 0.510, 0.535	!30
+	group_gamma_table(1,6) = 0.135, 0.180, 0.220, 0.265, 0.305, 0.345, 0.385, 0.420, 0.460, 0.495, 0.520	!40
+	group_gamma_table(1,7) = 0.100, 0.145, 0.197, 0.240, 0.290, 0.330, 0.370, 0.410, 0.445, 0.482, 0.515	!60
+	group_gamma_table(1,8) = 0.030, 0.092, 0.155, 0.210, 0.265, 0.315, 0.360, 0.402, 0.440, 0.477, 0.508	!300
+
+	! for crowd loading - fixed (steady state)
+	*DEL,crowd_gamma_table
+	*DIM,crowd_gamma_table,TABLE,2,1
+
+	crowd_gamma_table(1,0) = 0.000, 0.200
+
+	crowd_gamma_table(1,1) = 0.01, 0.225
+
+	
+	! K FACTOR
+	*DEL,walking_k_table
+	*DIM,walking_k_table,TABLE,41,1
+
+	*VFILL,walking_k_table(1,0),RAMP,0,0.2
+	walking_k_table(1,1)	= 0.00, 0.00, 0.01, 0.04, 0.10, 0.24, 0.44, 0.70, 0.92, 1.00, 0.99,
+	walking_k_table(12,1)	= 0.85, 0.62, 0.40, 0.24, 0.28, 0.31, 0.34, 0.36, 0.36, 0.34,
+	walking_k_table(22,1)	= 0.32, 0.29, 0.25, 0.21, 0.18, 0.15, 0.13, 0.12, 0.12, 0.11,
+	walking_k_table(32,1)	= 0.11, 0.10, 0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02
+
+	*DEL,jogging_k_table
+	*DIM,jogging_k_table,TABLE,41,1
+
+	*VFILL,jogging_k_table(1,0),RAMP,0,0.2
+	jogging_k_table(1,1)	= 0.00, 0.00, 0.00, 0.00, 0.00, 0.02, 0.04, 0.15, 0.32, 0.58, 0.92,
+	jogging_k_table(12,1)	= 1.10, 1.17, 1.11, 0.92, 0.64, 0.36, 0.16, 0.10, 0.12, 0.16,
+	jogging_k_table(22,1)	= 0.18, 0.20, 0.21, 0.22, 0.21, 0.21, 0.19, 0.16, 0.14, 0.11,
+	jogging_k_table(32,1)	= 0.08, 0.05, 0.04, 0.04, 0.03, 0.03, 0.03, 0.02, 0.02, 0.02
+
+	!*VPLOT,group_gamma_table(1,0),group_gamma_table(1,1),2,3,4,5,6,7,8
+	!*VPLOT,crowd_gamma_table(1,0),crowd_gamma_table(1,1),1
+	!*VPLOT,jogging_k_table(1,0),jogging_k_table(1,1),1
+	!*VPLOT,walking_k_table(1,0),walking_k_table(1,1),1
+	
+	! S.EFF
+	*DEL,mode_area_cum
+	*DIM,mode_area_cum,ARRAY,n_num,1
+	*VABS,,1
+	*VOPER,mode_area_cum,n_path_data(1,3),INT1,n_path_data(1,2)
+	*DEL,dummy
+	*VFUN,dummy,DSORT,n_path_data(1,3)
+	UZ_max = dummy(1)
+	*DEL,mode_area
+	mode_area	= mode_area_cum(n_num)
+
+	S_eff		= mode_area/(0.634*UZ_max)
+	S		= span_x
+	lambda		= 0.634*S_eff/S
+
+	log_decr	= 2*pi*ksic/sqrt(1-ksic**2) !2*pi*ksic
+
+	! LOAD AMPLITUDE
+	*IF,loading,EQ,'moving',THEN
+		*IF,movement,EQ,'walking',THEN
+			load_velocity	= 1.70
+			F_0		= 280		!reference load
+
+			load_amplitude	= F_0*walking_k_table(f_s)*sqrt(1 + group_gamma_table(log_decr, S_eff)*(N_walking-1))
+		*ELSEIF,movement,EQ,'jogging',THEN
+			load_velocity	= 3.00
+			F_0		= 910		!reference load
+
+			load_amplitude	= F_0*jogging_k_table(f_s)*sqrt(1 + group_gamma_table(log_decr, S_eff)*(N_jogging-1))
+		*ENDIF
+		
+	*ELSEIF,loading,EQ,'fixed',THEN
+		F_0		= 280		!reference load
+		N_crowd		= loaded_width*S*ro_crowd
+		![N/mm2]
+		load_amplitude	= 1.8*(F_0/(loaded_width*S))*walking_k_table(f_s)*sqrt(crowd_gamma_table(log_decr, S_eff)*N_crowd/lambda)
+	*ENDIF
+
+*ELSEIF,code,EQ,'SETRA',THEN
+!Sétra (2006) - Assessment of vibrational behaviour of footbridges under pedestrian loading
+	! CATEGORY
+	*IF,SETRA_category,EQ,1,THEN
+		ro_crowd	= 1.0/1000**2
+	*ELSEIF,SETRA_category,EQ,2,THEN
+		ro_crowd	= 0.8/1000**2
+	*ELSEIF,SETRA_category,EQ,3,THEN
+		ro_crowd	= 0.5/1000**2
+	*ELSEIF,SETRA_category,EQ,4,THEN
+		*MSG,ERROR
+		No dynamic analysis is required for Class IV bridges per Setra!
+	*ENDIF
+	
+	! PSI FACTOR
+	*DEL,psi_table_VL
+	*DIM,psi_table_VL,TABLE,6,1
+
+	*DEL,psi_table_T
+	*DIM,psi_table_T,TABLE,6,1
+
+	! vertical and longitudinal directions
+	psi_table_VL(1,0) = 0.000, 1.000, 1.700, 2.100, 2.600, 3.000
+	psi_table_VL(1,1) = 0.000, 0.000, 1.000, 1.000, 0.000, 0.000
+
+	! transverse direction
+	psi_table_T(1,0) = 0.000, 0.300, 0.500, 1.100, 1.300, 1.800
+	psi_table_T(1,1) = 0.000, 0.000, 1.000, 1.000, 0.000, 0.000
+	
+	S		= span_x
+
+	*IF,loading,EQ,'moving',THEN
+		!....no such load case
+	*ELSEIF,loading,EQ,'fixed',THEN
+
+		*IF,direction,EQ,'V',THEN
+			F_0		= 280		!reference load
+			N_crowd		= loaded_width*S*ro_crowd
+			![N/mm2]
+			load_amplitude	= 10.8*ro_crowd*F_0*psi_table_VL(f_s)*sqrt(ksic/N_crowd)
+		*ELSEIF,direction,EQ,'L',THEN
+			F_0		= 140		!reference load
+			N_crowd		= loaded_width*S*ro_crowd
+			![N/mm2]
+			load_amplitude	= 10.8*ro_crowd*F_0*psi_table_VL(f_s)*sqrt(ksic/N_crowd)
+		*ELSEIF,direction,EQ,'T',THEN
+			F_0		= 35		!reference load
+			N_crowd		= loaded_width*S*ro_crowd
+			![N/mm2]
+			load_amplitude	= 10.8*ro_crowd*F_0*psi_table_T(f_s)*sqrt(ksic/N_crowd)
+		*ENDIF
+
+		! case2: very dense crowd still needs! - for Class I(1) footbridges
+		! case3: the effect of second harmonic
+		! lateral vibration should be added!
+	*ENDIF
+*ENDIF
+
+
+! ------------------------------------------------------------------------------------------------------
+! - LOADING MATRIX - time~node
+! ------------------------------------------------------------------------------------------------------
+
+! 'loading window' for time history loading - for masking the exciting load
+*DEL,n_loading_w
+*DIM,n_loading_w,ARRAY,time_step_num,n_num
+
+*DEL,n_loading_f
+*DIM,n_loading_f,ARRAY,time_step_num,n_num
+
+! loading defined as table
+*DO,i,1,n_num
+	*DEL,n_%i%_loading_table
+	*DIM,n_%i%_loading_table,TABLE,time_step_num,1,1,TIME
+*ENDDO
+
+*DO,i,1,n_num
+	t = 0
+	*DO,j,1,time_step_num
+
+		*IF,loading,EQ,'moving',THEN
+			*IF,t,GE,n_loading_t(i,2),AND,t,LT,n_loading_t(i,3),THEN
+				n_loading_w(j,i) = 1
+
+				! Load vector for nodes
+				n_loading_f(j,i) = load_amplitude*sin(2*pi*t*f_s)
+
+				! table fill
+				n_%i%_loading_table(j,1) = load_amplitude*sin(2*pi*t*f_s)
+			*ENDIF	
+		*ELSEIF,loading,EQ,'fixed',THEN
+			*IF,j,LE,time_step_num_,THEN
+				n_loading_w(j,i) = 1
+
+				! Load vector for nodes
+				n_loading_f(j,i) = SIGN(1,-n_path_data(i,3))*load_amplitude*sin(2*pi*t*f_s)*n_loading_d(i,1)*loaded_width
+
+				! table fill
+				n_%i%_loading_table(j,1) = SIGN(1,-n_path_data(i,3))*load_amplitude*sin(2*pi*t*f_s)*n_loading_d(i,1)*loaded_width
+			*ENDIF
+		*ENDIF
+		! table fill
+		n_%i%_loading_table(j,0) = t
+
+		t = t + dt
+	*ENDDO
+*ENDDO
+
+
+! ------------------------------------------------------------------------------------------------------
+! - DAMPING - it is problematic - cannot automatically select the 'good' frequencies
+! ------------------------------------------------------------------------------------------------------
+! mass and stiffness damping based on the first two 'important' eigeinfreqs (Rayleigh damping)
+! assuming the same structural damping at both frequencies
+*IF,f1,EQ,0,THEN
+	omega_1		= freq_s(nrmodes+1-excited_freq,1)/2/pi
+*ELSEIF,f1,NE,0,THEN
+	omega_1		= f1/2/pi
+*ENDIF
+
+*IF,f2,EQ,0,THEN
+	omega_2		= freq_s(nrmodes+1-excited_freq+1,1)/2/pi	!+1 nem jó WARNING
+*ELSEIF,f2,NE,0,THEN
+	omega_2		= f2/2/pi
+*ENDIF
+
+beta_d			= 2*ksic/(omega_1 + omega_2)
+alpha_d			= omega_1*omega_2*beta_d
+
+
+FINISH
+
+!***************************************************************************************************************************
+!* SOLVER - TIME HISTORY
+!***************************************************************************************************************************
+/SOLU
+
+KEYW,pr_sgui,1		! suppress solution done message
+
+!SETTINGS
+ANTYPE,TRANS
+!NLGEOM,ON
+!PSTRES,ON
+
+ALLSEL,ALL
+
+! analysis type
+*IF,analysis,EQ,'full',THEN
+
+	TRNOPT,FULL
+	PSCONTROL,SOLV,ON
+	!SOLCONTROL,ON,,,
+	*IF,load_def,EQ,'array',THEN
+		AUTOTS,OFF
+	*ENDIF
+	RESCONTROL, ,ALL,LAST,0
+	!OUTRES,ALL,ALL
+
+	! Rayleigh damping
+	ALPHAD,alpha_d
+	BETAD,alpha_d
+
+*ELSEIF,analysis,EQ,'modal',THEN
+	
+	TRNOPT,MSUP
+	PSCONTROL,SOLV,ON
+	!TIMINT, ON, STRUCT
+	AUTOTS,OFF
+
+	! constant damping
+	DMPRAT,ksic	! full transient-nél nem alkalmazható	
+*ENDIF
+
+*DEL,time_
+*DIM,time_,ARRAY,time_step_num
+
+!TIME-HISTORY ANALYSIS
+ACEL,0,0,0
+
+
+! -----------------
+! - LOADING
+! -----------------
+
+time_num = 0
+*DO,i,1,time_step_num
+	ALLSEL,ALL
+	FDELE,ALL,ALL
+
+	TIME,time_num+i*dt
+	time_(i)	= i*dt
+
+	*IF,load_def,EQ,'array',THEN
+
+		DELTIM,dt,dt,dt,
+
+		*DO,j,1,n_num
+			F, n_path_data(j,1), FZ, n_loading_f(i,j)
+		*ENDDO
+
+	*ELSEIF,load_def,EQ,'table',THEN
+
+		DELTIM,dt,dt/100,dt*100,
+		!DELTIM,dt,dt,dt,
+		
+		*DO,j,1,n_num
+			*DEL,dummy_loading
+			*DIM,dummy_loading,TABLE,time_step_num,1,1,TIME
+			! create a copy
+			*TOPER,dummy_loading,n_%j%_loading_table,ADD,n_%j%_loading_table,1,0,,
+
+			ALLSEL,ALL
+			F, n_path_data(j,1), FZ, %dummy_loading%,,,
+
+			!kbc,0
+		*ENDDO
+
+	*ENDIF
+
+	*IF,results,EQ,'full',THEN
+		OUTRES,ALL,ALL
+	*ELSEIF,results,EQ,'reduced',THEN
+		OUTRES,ERASE
+		OUTRES,ALL,NONE
+		OUTRES,NSOL,ALL,moving_load_results
+		OUTRES,A,ALL,moving_load_results
+	*ENDIF
+
+	
+	ALLSEL,ALL
+
+	SOLVE
+*ENDDO
+
+KEYW,pr_sgui,0
+*MSG,INFO,
+Transient analysis has been completed.
+FINISH
+
+*IF,analysis,EQ,'modal',THEN
+
+	! *** expansion pass
+	/SOLU
+
+	EXPASS,ON
+	NUMEXP,ALL
+	SOLVE
+
+	FINISH
+
+*ENDIF
+
+
+!***************************************************************************************************************************
+! * POST-PROCESSING
+!***************************************************************************************************************************
+*IF,post_proc,EQ,'yes',THEN
+
+/POST26
+
+! select the node with maximum acceleration from 'moving_load_results' -> saves the time-history result
+! + the maximum acceleration and displacement is saved for every node
+CMSEL,S,moving_load_results,NODE
+*GET,n_results_num,NODE,0,COUNT
+
+*DEL,n_i_UZ
+*DEL,n_results_data
+*DIM,n_results_data,ARRAY,n_results_num,4
+*VGET, n_results_data(1,1), NODE, n_results_num, NLIST, , , ,0
+
+
+*DEL,max_ACCZ_
+*DIM,max_ACCZ_,ARRAY,n_results_num,1
+
+*DEL,n_i
+max_ACCZ = 0
+*DO,i,1,n_results_num
+	n_i = n_results_data(i)
+	
+	! x coordinates of 'moving_load_results' nodes
+	*GET,n_results_data(i,2),NODE,n_i,LOC,X
+	
+	! translation
+	NSOL,2,n_i,U,Z
+	VGET,n_i_UZ,2
+
+	*VABS,,1
+	*VFUN,n_i_UZ_abs_sort,DSORT,n_i_UZ
+
+	n_results_data(i,3) = n_i_UZ_abs_sort(1)
+
+	! acceleration
+	*VOPER,n_i_ACCZ,n_i_UZ,DER2,time_
+
+	*VABS,,1
+	*VFUN,n_i_ACCZ_abs_sort,DSORT,n_i_ACCZ
+
+	n_results_data(i,4) = n_i_ACCZ_abs_sort(1)
+
+	
+	*IF,n_results_data(i,4),GT,max_ACCZ,THEN
+		max_ACCZ	= n_results_data(i,4)
+		n_max_ACCZ	= n_i
+	*ENDIF
+*ENDDO
+
+*DEL,dummy
+*MOPER,dummy,n_results_data,SORT,,2
+
+!NSOL,3,n1,ACC,Z	!idk why it is not working..
+!PLVAR,3
+NSOL,2,n_max_ACCZ,U,Z
+PLVAR,2
+
+!/UI,COPY,SAVE,PNG,GRAPH,COLOR,REVERSE,PORTRAIT,YES
+
+*DEL,max_ACCZ_UZ
+*DIM,max_ACCZ_UZ,ARRAY,time_step_num,1
+*DEL,max_ACCZ
+*DIM,max_ACCZ,ARRAY,time_step_num,1
+
+VGET,max_ACCZ_UZ(1,1),2
+*VOPER,max_ACCZ,max_ACCZ_UZ,DER2,time_
+
+
+! save results
+*MWRITE, time_, time_%file_name%_DLA_%analysis%_%code%_ksi_%ksic_char%_%loading%_%movement%, txt, , jik
+(1000F30.5)
+
+! maximum acc node of 'moving_load_results'
+*MWRITE, max_ACCZ_UZ, max_ACCZ_UZ_%file_name%_DLA_%analysis%_%code%_ksi_%ksic_char%_%loading%_%movement%, txt, , jik
+(1000F30.5)
+
+*MWRITE, max_ACCZ, max_ACCZ_%file_name%_DLA_%analysis%_%code%_ksi_%ksic_char%_%loading%_%movement%, txt, , jik
+(1000F30.5)
+
+! all nodes of 'moving_load_results'
+*MWRITE, n_results_data, n_results_data_%file_name%_DLA_%analysis%_%code%_ksi_%ksic_char%_%loading%_%movement%, txt, , jik
+(1000F30.5)
+
+KEYW,pr_sgui,0
+*MSG,INFO,n_max_ACCZ/1000
+Maximum acceleration is %n_max_ACCZ% m/s2.
+
+
+*ENDIF
+
+SAVE
+

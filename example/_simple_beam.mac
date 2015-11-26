@@ -1,0 +1,170 @@
+!# SIMPLE TIME HISTORY EXAMPLE
+!# DYNAMIC ANALYSIS OF A 'PEDESTRIAN BRIDGE' per BS EN 1991-2 NA - moving, pulsating load
+
+FINISH
+/CLEAR, start
+!/NERR,0,99999999,,0
+
+![N], [mm]
+! 1 unit = 1e-3 [kg]
+
+file_name		= 'simple_beam'
+
+/FILNAME, %file_name%
+/TITLE,   %file_name%
+
+/PREP7
+
+!***************************************
+!* SETTINGS
+!***************************************
+
+model			= 'beam'		    ! 'beam'; 'shell'
+
+! Concrete
+nuc			= 0.2                       !Poisson
+Ec			= 1.44*34500                     !Young mod.
+Eceff			= 15000			    !for long term loading
+roc			= 2.50e-9		    !ro concrete [g/mm3]
+alphac			= 10e-6
+ksic			= 0.03
+
+mesh_size		= 500
+
+!constants
+pi			= 3.14159265359
+
+!***************************************
+!* MATERIALS - ELEMENTS
+!***************************************
+
+! Beam
+ET,100,BEAM188
+	KEYOPT,100,1,1		!warping dof
+	KEYOPT,100,3,2		!quadratic
+	KEYOPT,100,4,2
+	!KEYOPT,100,12,1
+	MPTEMP,,,,,,,,
+	MPTEMP,1,0
+	MPDATA,EX,100,,Ec                     
+	MPDATA,PRXY,100,,nuc    
+	MPDATA,DENS,100,,roc
+	MPDATA,ALPX,100,,alphac
+	!MPDATA,DMPR,100,,ksic		
+
+	SECTYPE,100,BEAM,RECT,girder,0
+	SECOFFSET,CENT
+	SECDATA,100,100,10,10
+
+
+t1400			= 100
+ET,30,SHELL181
+	KEYOPT,30,8,2
+	R,30,t1400,t1400,t1400,t1400, , , 
+	MPTEMP,,,,,,,,
+	MPTEMP,1,0 
+	MPDATA,EX,30,,Ec                    
+	MPDATA,PRXY,30,,nuc      
+	MPDATA,DENS,30,,roc
+	MPDATA,ALPX,30,,alphac
+
+!***************************************
+!* MODEL
+!***************************************
+
+! Girder
+cs_num			= 11
+*DEL,cs_pos
+*DIM,cs_pos,ARRAY,cs_num,2
+
+!X
+cs_pos(1,1)		= 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000
+
+*IF,model,EQ,'beam',THEN
+	*DO,i,1,cs_num
+		K, i, cs_pos(i,1), 0, cs_pos(i,2)
+	*ENDDO
+
+	*DO,i,1,cs_num-1
+		ALLSEL,ALL
+		L, i, i+1
+	*ENDDO
+
+	LATT,100,100,100,,,,100
+	ESIZE, mesh_size
+	LMESH,ALL
+
+	CM,girder,ELEM
+
+	! BOUNDARY
+	KSEL,S,KP,,1
+	NSLK,S
+	D,ALL,UX,0
+	D,ALL,UY,0
+	D,ALL,UZ,0
+
+	KSEL,S,KP,,cs_num
+	NSLK,S
+	!D,ALL,UX,0
+	D,ALL,UY,0
+	D,ALL,UZ,0
+
+*ELSEIF,model,EQ,'shell',THEN
+	*DO,i,1,cs_num
+		K, 1+(i-1)*100, cs_pos(i,1), -500, cs_pos(i,2)
+		K, 2+(i-1)*100, cs_pos(i,1), 0, cs_pos(i,2)
+		K, 3+(i-1)*100, cs_pos(i,1), 500, cs_pos(i,2)
+	*ENDDO
+
+	*DO,i,1,cs_num-1
+		A,1+(i-1)*100,2+(i-1)*100,3+(i-1)*100, 3+(i)*100,2+(i)*100,1+(i)*100
+	*ENDDO
+
+	AATT,30,30,30
+	ESIZE, mesh_size
+	AMESH,ALL
+	ALLSEL,ALL
+
+	CM,girder,ELEM
+
+	ALLSEL,ALL
+	KSEL,S,LOC,X,cs_pos(1,1)-1,cs_pos(1,1)+1
+	NSLK,S
+	D,ALL,UX,0
+	D,ALL,UY,0
+	D,ALL,UZ,0
+
+	KSEL,S,LOC,X,cs_pos(cs_num,1)-1,cs_pos(cs_num,1)+1
+	NSLK,S
+	!D,ALL,UX,0
+	D,ALL,UY,0
+	D,ALL,UZ,0
+*ENDIF
+
+
+NUMMRG, NODE
+NUMMRG, KP
+NUMMRG, ELEM
+
+FINISH
+
+!***************************************
+!* SOLVER - moving load analysis
+!***************************************
+
+! moving load path
+CMSEL,S,girder,ELEM
+!ESEL,R,CENT,x,2000,5000
+CM,moving_load_path,ELEM
+
+! nodes to extract results
+CMSEL,S,girder,ELEM
+NSLE,S
+!NSEL,S,LOC,X,2000,8000
+CM,moving_load_results,NODE
+
+ALLSEL,ALL
+
+SAVE,%file_name%,DB
+
+DLA_ini
